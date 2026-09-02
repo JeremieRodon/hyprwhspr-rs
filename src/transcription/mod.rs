@@ -232,7 +232,7 @@ impl TranscriptionBackend {
             TranscriptionBackend::Groq(provider) => provider.transcribe(audio_data).await,
             TranscriptionBackend::Gemini(provider) => provider.transcribe(audio_data).await,
             TranscriptionBackend::CustomOpenAi(provider, _) => {
-                provider.transcribe(audio_data).await
+                provider.transcribe(audio_data, overrides).await
             }
             #[cfg(feature = "parakeet")]
             TranscriptionBackend::Parakeet(provider) => provider.transcribe(audio_data).await,

@@ -72,7 +72,10 @@ async fn custom_provider_transcribes_against_whisper_cpp_server() {
         audio.push((t * 440.0 * std::f32::consts::TAU).sin() * 0.1);
     }
 
-    let result = transcriber.transcribe(audio).await.expect("transcribe");
+    let result = transcriber
+        .transcribe(audio, Default::default())
+        .await
+        .expect("transcribe");
     assert!(result.text.trim().is_empty() || !result.text.contains("error"));
 
     let _ = child.kill();
