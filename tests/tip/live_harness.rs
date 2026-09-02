@@ -1,7 +1,7 @@
-use crate::bench_report::{TipBenchmarkInput, print_case_report};
+use crate::bench_report::{print_case_report, TipBenchmarkInput};
 use crate::diff_report::{assert_text_eq, print_text_diff_report};
 use crate::resource_timeline::TipResourceTimeline;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use hyprwhspr_rs::audio::FastVad;
 use hyprwhspr_rs::config::{Config, ConfigManager, TranscriptionProvider};
 use hyprwhspr_rs::text::NormalizeTextService;
@@ -144,7 +144,7 @@ async fn run_live_case(
             None,
             || async {
                 backend
-                    .transcribe(preprocessed.audio.clone())
+                    .transcribe(preprocessed.audio.clone(), Default::default())
                     .await
                     .with_context(|| format!("transcribe with {}", provider.id))
             },

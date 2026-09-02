@@ -28,7 +28,16 @@
       in
         with pkgs; {
           devShells.default = mkShell {
-            buildInputs = [rustToolchain cargo-flamegraph perf libclang cmake protobuf openssl zstd awscli2 kubectl];
+            buildInputs = [
+              pkg-config
+              rustToolchain
+              openssl
+              alsa-lib
+              udev
+              onnxruntime
+              systemdLibs
+              libxkbcommon
+            ];
             RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             LIBCLANG_PATH = pkgs.lib.makeLibraryPath [pkgs.llvmPackages_latest.libclang.lib];
           };
