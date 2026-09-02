@@ -40,21 +40,75 @@ impl FromStr for RecorderState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Per-recording language/translation overrides carried by Start and Toggle commands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscribeOptions {
+    /// BCP-47 / whisper language code (e.g. "fr", "en", "auto").
+    /// `None` means use the configured default.
+    pub lang: Option<String>,
+    /// When true, add `--translate` so whisper outputs English regardless of input language.
+    pub translate: Option<bool>,
+}
+
+impl fmt::Display for TranscribeOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(lang) = &self.lang {
+            write!(f, " lang={lang}")?;
+        }
+        if let Some(translate) = self.translate {
+            if translate {
+                f.write_str(" translate")?;
+            } else {
+                f.write_str(" no_translate")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for TranscribeOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let mut opts = Self::default();
+        for tok in value.split_whitespace() {
+            if let Some(lang) = tok.strip_prefix("lang=") {
+                opts.lang = Some(lang.to_string());
+            } else if tok == "translate" {
+                opts.translate = Some(true);
+            } else if tok == "no_translate" {
+                opts.translate = Some(false);
+            }
+        }
+        Ok(opts)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordCommand {
-    Start,
+    Start(TranscribeOptions),
     Stop,
-    Toggle,
+    Toggle(TranscribeOptions),
     Status,
 }
 
 impl RecordCommand {
-    pub fn as_str(self) -> &'static str {
+    pub fn start_default() -> Self {
+        Self::Start(TranscribeOptions::default())
+    }
+
+    pub fn toggle_default() -> Self {
+        Self::Toggle(TranscribeOptions::default())
+    }
+}
+
+impl fmt::Display for RecordCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Toggle => "toggle",
-            Self::Status => "status",
+            Self::Start(opts) => write!(f, "start{opts}"),
+            Self::Stop => f.write_str("stop"),
+            Self::Toggle(opts) => write!(f, "toggle{opts}"),
+            Self::Status => f.write_str("status"),
         }
     }
 }
@@ -63,10 +117,14 @@ impl FromStr for RecordCommand {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        match value.trim() {
-            "start" => Ok(Self::Start),
+        let (verb, opts) = match value.split_once(" ") {
+            Some((verb, opts)) => (verb, opts),
+            None => (value, ""),
+        };
+        match verb {
+            "start" => Ok(Self::Start(opts.parse()?)),
             "stop" => Ok(Self::Stop),
-            "toggle" => Ok(Self::Toggle),
+            "toggle" => Ok(Self::Toggle(opts.parse()?)),
             "status" => Ok(Self::Status),
             other => Err(anyhow!("Unknown record command: {other}")),
         }
@@ -151,7 +209,7 @@ mod platform {
         })?;
 
         stream
-            .write_all(command.as_str().as_bytes())
+            .write_all(command.to_string().as_bytes())
             .await
             .context("Failed to send control command")?;
         stream
@@ -280,7 +338,7 @@ mod tests {
     fn parses_command_strings() {
         assert_eq!(
             RecordCommand::from_str("start").unwrap(),
-            RecordCommand::Start
+            RecordCommand::Start(TranscribeOptions::default())
         );
         assert_eq!(
             RecordCommand::from_str("stop").unwrap(),
@@ -288,12 +346,44 @@ mod tests {
         );
         assert_eq!(
             RecordCommand::from_str("toggle").unwrap(),
-            RecordCommand::Toggle
+            RecordCommand::Toggle(TranscribeOptions::default())
         );
         assert_eq!(
             RecordCommand::from_str("status").unwrap(),
             RecordCommand::Status
         );
+    }
+
+    #[test]
+    fn roundtrips_record_options() {
+        let cmd = RecordCommand::Toggle(TranscribeOptions {
+            lang: Some("fr".to_string()),
+            translate: Some(true),
+        });
+        let encoded = cmd.to_string();
+        assert_eq!(encoded, "toggle lang=fr translate");
+        let decoded = RecordCommand::from_str(&encoded).unwrap();
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn roundtrips_lang_only() {
+        let cmd = RecordCommand::Start(TranscribeOptions {
+            lang: Some("auto".to_string()),
+            translate: Some(false),
+        });
+        let decoded = RecordCommand::from_str(&cmd.to_string()).unwrap();
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn roundtrips_translate_only() {
+        let cmd = RecordCommand::Toggle(TranscribeOptions {
+            lang: Some("en".to_string()),
+            translate: Some(true),
+        });
+        let decoded = RecordCommand::from_str(&cmd.to_string()).unwrap();
+        assert_eq!(decoded, cmd);
     }
 
     #[test]

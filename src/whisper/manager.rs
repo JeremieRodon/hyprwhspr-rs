@@ -1,6 +1,6 @@
 use crate::transcription::{
     clean_transcription, contains_only_non_speech_markers, BackendMetrics, BackendPhaseProbe,
-    TranscriptionResult,
+    TranscriptionResult, WhisperOverrides,
 };
 use anyhow::{anyhow, Context, Result};
 use std::convert::TryFrom;
@@ -49,6 +49,8 @@ pub struct WhisperManager {
     gpu_layers: i32,
     vad: WhisperVadOptions,
     no_speech_threshold: f32,
+    default_language: String,
+    default_translate: bool,
 }
 
 impl WhisperManager {
@@ -61,6 +63,8 @@ impl WhisperManager {
         gpu_layers: i32,
         vad: WhisperVadOptions,
         no_speech_threshold: f32,
+        default_language: String,
+        default_translate: bool,
     ) -> Result<Self> {
         if binary_paths.is_empty() {
             return Err(anyhow!(
@@ -77,6 +81,8 @@ impl WhisperManager {
             gpu_layers,
             vad,
             no_speech_threshold,
+            default_language,
+            default_translate,
         })
     }
 
@@ -176,7 +182,11 @@ impl WhisperManager {
         "CPU only (no GPU detected)".to_string()
     }
 
-    pub async fn transcribe(&self, audio_data: Vec<f32>) -> Result<TranscriptionResult> {
+    pub async fn transcribe(
+        &self,
+        audio_data: Vec<f32>,
+        overrides: WhisperOverrides,
+    ) -> Result<TranscriptionResult> {
         if audio_data.is_empty() {
             return Ok(TranscriptionResult {
                 text: String::new(),
@@ -212,7 +222,7 @@ impl WhisperManager {
         // Run whisper.cpp CLI
         let (transcription_result, mut whisper_phase) =
             BackendPhaseProbe::measure_async("backend.whisper.cli", encoded_bytes, || {
-                self.run_whisper_cli(&temp_wav)
+                self.run_whisper_cli(&temp_wav, &overrides)
             })
             .await;
         let transcription = transcription_result?;
@@ -312,7 +322,11 @@ impl WhisperManager {
         Ok(())
     }
 
-    async fn run_whisper_cli(&self, audio_file: &PathBuf) -> Result<String> {
+    async fn run_whisper_cli(
+        &self,
+        audio_file: &PathBuf,
+        overrides: &WhisperOverrides,
+    ) -> Result<String> {
         let mut last_error: Option<anyhow::Error> = None;
         let mut attempted: Vec<PathBuf> = Vec::new();
 
@@ -327,7 +341,7 @@ impl WhisperManager {
 
             attempted.push(binary.clone());
 
-            match self.invoke_whisper(binary, audio_file) {
+            match self.invoke_whisper(binary, audio_file, overrides) {
                 Ok(result) => {
                     if last_error.is_some() {
                         info!("Whisper succeeded using fallback binary: {:?}", binary);
@@ -355,10 +369,16 @@ impl WhisperManager {
         Err(last_error.unwrap_or_else(|| anyhow!("All whisper binaries failed. Tried: {}", tried)))
     }
 
-    fn invoke_whisper(&self, binary: &Path, audio_file: &PathBuf) -> Result<String> {
+    fn invoke_whisper(
+        &self,
+        binary: &Path,
+        audio_file: &PathBuf,
+        overrides: &WhisperOverrides,
+    ) -> Result<String> {
         let mut cmd = Command::new(binary);
 
-        // Basic args
+        let language = overrides.lang.as_deref().unwrap_or(&self.default_language);
+
         cmd.args(&[
             "-m",
             self.model_path
@@ -370,13 +390,17 @@ impl WhisperManager {
                 .ok_or_else(|| anyhow!("Audio path contains invalid UTF-8"))?,
             "--output-txt",
             "--language",
-            "en",
+            language,
             "--threads",
             &self.threads.to_string(),
             "--prompt",
             &self.whisper_prompt,
-            "--no-timestamps", // Just plain text, no timestamps
+            "--no-timestamps",
         ]);
+
+        if overrides.translate.unwrap_or(self.default_translate) {
+            cmd.arg("--translate");
+        }
 
         cmd.arg("--no-speech-thold");
         cmd.arg(format!("{}", self.no_speech_threshold));

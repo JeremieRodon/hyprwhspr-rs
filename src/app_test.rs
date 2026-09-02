@@ -10,7 +10,7 @@ use crate::config::{Config, ConfigManager, TranscriptionProvider};
 use crate::input::TextInjector;
 use crate::status::StatusWriter;
 use crate::text::NormalizeTextService;
-use crate::transcription::{TranscriptionBackend, TranscriptionResult};
+use crate::transcription::{TranscriptionBackend, TranscriptionResult, WhisperOverrides};
 use crate::whisper::WhisperVadOptions;
 
 /// Test version of the app that doesn't use global shortcuts
@@ -333,7 +333,10 @@ impl HyprwhsprAppTest {
         let TranscriptionResult {
             text: transcription,
             ..
-        } = self.transcriber.transcribe(audio_for_transcription).await?;
+        } = self
+            .transcriber
+            .transcribe(audio_for_transcription, WhisperOverrides::default())
+            .await?;
 
         if transcription.trim().is_empty() {
             warn!("Empty transcription - Whisper couldn't understand the audio");

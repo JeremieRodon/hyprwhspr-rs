@@ -9,11 +9,13 @@ use crate::audio::{
 };
 use crate::benchmark::BenchmarkRecorder;
 use crate::config::{Config, ConfigManager, ShortcutsConfig, TranscriptionProvider};
-use crate::control::{ControlRequest, ControlServer, RecordCommand, RecorderState};
+use crate::control::{
+    ControlRequest, ControlServer, RecordCommand, RecorderState, TranscribeOptions,
+};
 use crate::input::{InputManagerHandle, ShortcutEvent, ShortcutKind, ShortcutPhase, TextInjector};
 use crate::status::{StatusWriter, WaybarState};
 use crate::text::NormalizeTextService;
-use crate::transcription::{TranscriptionBackend, TranscriptionResult};
+use crate::transcription::{TranscriptionBackend, TranscriptionResult, WhisperOverrides};
 use crate::whisper::WhisperVadOptions;
 
 fn resample_audio(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
@@ -115,6 +117,7 @@ pub struct HyprwhsprApp {
     current_config: Config,
     recording_session: Option<RecordingSession>,
     recording_trigger: Option<RecordingTrigger>,
+    recording_opts: Option<TranscribeOptions>,
     benchmark: Option<BenchmarkRecorder>,
     is_processing: bool,
 }
@@ -203,6 +206,7 @@ impl HyprwhsprApp {
             current_config: config,
             recording_session: None,
             recording_trigger: None,
+            recording_opts: None,
             benchmark: None,
             is_processing: false,
         })
@@ -407,12 +411,20 @@ impl HyprwhsprApp {
     async fn handle_shortcut(&mut self, event: ShortcutEvent) -> Result<()> {
         match (event.kind, event.phase) {
             (ShortcutKind::Press, ShortcutPhase::Start) => {
-                self.toggle_recording(RecordingTrigger::PressShortcut, event.triggered_at)
-                    .await?;
+                self.toggle_recording(
+                    RecordingTrigger::PressShortcut,
+                    event.triggered_at,
+                    TranscribeOptions::default(),
+                )
+                .await?;
             }
             (ShortcutKind::Hold, ShortcutPhase::Start) => {
-                self.start_recording_if_idle(RecordingTrigger::HoldShortcut, event.triggered_at)
-                    .await?;
+                self.start_recording_if_idle(
+                    RecordingTrigger::HoldShortcut,
+                    event.triggered_at,
+                    TranscribeOptions::default(),
+                )
+                .await?;
             }
             (ShortcutKind::Hold, ShortcutPhase::End) => {
                 if matches!(self.recording_trigger, Some(RecordingTrigger::HoldShortcut))
@@ -452,15 +464,15 @@ impl HyprwhsprApp {
         let now = Instant::now();
 
         match command {
-            RecordCommand::Start => {
-                self.start_recording_if_idle(RecordingTrigger::ExternalCommand, now)
+            RecordCommand::Start(opts) => {
+                self.start_recording_if_idle(RecordingTrigger::ExternalCommand, now, opts)
                     .await?;
             }
             RecordCommand::Stop => {
                 self.stop_recording_if_active(now).await?;
             }
-            RecordCommand::Toggle => {
-                self.toggle_recording(RecordingTrigger::ExternalCommand, now)
+            RecordCommand::Toggle(opts) => {
+                self.toggle_recording(RecordingTrigger::ExternalCommand, now, opts)
                     .await?;
             }
             RecordCommand::Status => {}
@@ -483,6 +495,7 @@ impl HyprwhsprApp {
         &mut self,
         trigger: RecordingTrigger,
         triggered_at: Instant,
+        opts: TranscribeOptions,
     ) -> Result<()> {
         if self.is_processing {
             warn!("Still processing previous recording, ignoring start request");
@@ -494,7 +507,7 @@ impl HyprwhsprApp {
             return Ok(());
         }
 
-        self.start_recording(trigger, triggered_at).await
+        self.start_recording(trigger, triggered_at, opts).await
     }
 
     async fn stop_recording_if_active(&mut self, triggered_at: Instant) -> Result<()> {
@@ -511,6 +524,7 @@ impl HyprwhsprApp {
         &mut self,
         trigger: RecordingTrigger,
         triggered_at: Instant,
+        opts: TranscribeOptions,
     ) -> Result<()> {
         if self.is_processing {
             warn!("Still processing previous recording, ignoring toggle request");
@@ -520,7 +534,7 @@ impl HyprwhsprApp {
         if self.recording_session.is_some() {
             self.stop_recording(triggered_at).await?;
         } else {
-            self.start_recording(trigger, triggered_at).await?;
+            self.start_recording(trigger, triggered_at, opts).await?;
         }
 
         Ok(())
@@ -530,6 +544,7 @@ impl HyprwhsprApp {
         &mut self,
         trigger: RecordingTrigger,
         triggered_at: Instant,
+        opts: TranscribeOptions,
     ) -> Result<()> {
         info!("🎤 Starting recording...");
 
@@ -542,6 +557,7 @@ impl HyprwhsprApp {
 
         self.recording_session = Some(session);
         self.recording_trigger = Some(trigger);
+        self.recording_opts = Some(opts);
         self.set_input_app_busy(true);
 
         let recording_started_at = Instant::now();
@@ -575,6 +591,7 @@ impl HyprwhsprApp {
         let captured_audio = session.stop().context("Failed to stop recording")?;
         let stop_timestamp = Instant::now();
         self.recording_trigger = None;
+        let recording_opts = self.recording_opts.take().unwrap_or_default();
 
         if let Some(benchmark) = self.benchmark.as_mut() {
             benchmark.mark_recording_stop(stop_timestamp);
@@ -583,7 +600,7 @@ impl HyprwhsprApp {
 
         if !captured_audio.is_empty() {
             self.is_processing = true;
-            if let Err(e) = self.process_audio(captured_audio).await {
+            if let Err(e) = self.process_audio(captured_audio, recording_opts).await {
                 error!("❌ Error processing audio: {:#}", e);
                 self.status_writer
                     .set_error(&format!("{:#}", e))
@@ -680,7 +697,11 @@ impl HyprwhsprApp {
         }))
     }
 
-    async fn process_audio(&mut self, audio_data: CapturedAudio) -> Result<()> {
+    async fn process_audio(
+        &mut self,
+        audio_data: CapturedAudio,
+        opts: TranscribeOptions,
+    ) -> Result<()> {
         if let Some(benchmark) = self.benchmark.as_mut() {
             benchmark.mark_processing_start(Instant::now());
         }
@@ -744,8 +765,14 @@ impl HyprwhsprApp {
             benchmark.record_audio_sent(audio_for_transcription.len(), 16_000);
         }
 
-        let TranscriptionResult { text, metrics } =
-            self.transcriber.transcribe(audio_for_transcription).await?;
+        let whisper_overrides = WhisperOverrides {
+            lang: opts.lang,
+            translate: opts.translate,
+        };
+        let TranscriptionResult { text, metrics } = self
+            .transcriber
+            .transcribe(audio_for_transcription, whisper_overrides)
+            .await?;
 
         if let Some(benchmark) = self.benchmark.as_mut() {
             benchmark.record_backend_metrics(metrics);

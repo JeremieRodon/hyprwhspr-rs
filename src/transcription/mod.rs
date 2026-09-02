@@ -29,6 +29,14 @@ pub use phase_metrics::{BackendPhaseMetric, BackendResourceDelta};
 pub use postprocess::{clean_transcription, contains_only_non_speech_markers, is_prompt_artifact};
 pub use prompt::{PromptBlueprint, DEFAULT_PROMPT};
 
+/// Per-recording language/translate overrides forwarded to the whisper-cpp backend.
+/// Other backends receive this struct but ignore it.
+#[derive(Debug, Clone, Default)]
+pub struct WhisperOverrides {
+    pub lang: Option<String>,
+    pub translate: Option<bool>,
+}
+
 pub enum TranscriptionBackend {
     Whisper(WhisperManager),
     Groq(GroqTranscriber),
@@ -78,6 +86,8 @@ impl TranscriptionBackend {
                     whisper_cfg.gpu_layers,
                     vad,
                     whisper_cfg.no_speech_threshold,
+                    whisper_cfg.language.clone(),
+                    whisper_cfg.translate,
                 )?;
                 Ok(Self::Whisper(manager))
             }
@@ -210,9 +220,15 @@ impl TranscriptionBackend {
         }
     }
 
-    pub async fn transcribe(&self, audio_data: Vec<f32>) -> Result<TranscriptionResult> {
+    pub async fn transcribe(
+        &self,
+        audio_data: Vec<f32>,
+        overrides: WhisperOverrides,
+    ) -> Result<TranscriptionResult> {
         match self {
-            TranscriptionBackend::Whisper(manager) => manager.transcribe(audio_data).await,
+            TranscriptionBackend::Whisper(manager) => {
+                manager.transcribe(audio_data, overrides).await
+            }
             TranscriptionBackend::Groq(provider) => provider.transcribe(audio_data).await,
             TranscriptionBackend::Gemini(provider) => provider.transcribe(audio_data).await,
             TranscriptionBackend::CustomOpenAi(provider, _) => {

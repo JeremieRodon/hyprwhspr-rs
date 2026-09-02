@@ -444,6 +444,11 @@ pub struct WhisperCppConfig {
     pub no_speech_threshold: f32,
     pub models_dirs: Vec<String>,
     pub vad: VadConfig,
+    /// Default spoken-language code passed to whisper via `--language`.
+    /// Use a BCP-47 / whisper language code such as `"en"`, `"fr"`, or `"auto"`.
+    /// Can be overridden per-recording via `hyprwhspr-rs record toggle --lang <code>`.
+    pub language: String,
+    pub translate: bool,
 }
 
 impl Default for WhisperCppConfig {
@@ -457,6 +462,8 @@ impl Default for WhisperCppConfig {
             no_speech_threshold: default_no_speech_threshold(),
             models_dirs: default_models_dirs(),
             vad: VadConfig::default(),
+            language: "en".to_string(),
+            translate: false,
         }
     }
 }

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use hyprwhspr_rs::{
-    cli::{Cli, Command, RecordAction},
+    cli::{Cli, Command, LangArgs, RecordAction},
     config::TranscriptionProvider,
-    control::RecordCommand,
+    control::{RecordCommand, TranscribeOptions},
     install,
     logging::TextPipelineFormatter,
     send_record_command, ConfigManager, HyprwhsprApp,
@@ -22,9 +22,9 @@ async fn main() -> Result<()> {
             Command::Install(args) => return install::run_install(&args),
             Command::Record(args) => {
                 let command = match args.action {
-                    RecordAction::Start => RecordCommand::Start,
+                    RecordAction::Start(lang) => RecordCommand::Start(lang_args_to_opts(lang)),
                     RecordAction::Stop => RecordCommand::Stop,
-                    RecordAction::Toggle => RecordCommand::Toggle,
+                    RecordAction::Toggle(lang) => RecordCommand::Toggle(lang_args_to_opts(lang)),
                     RecordAction::Status => RecordCommand::Status,
                 };
                 let state = send_record_command(command).await?;
@@ -131,6 +131,13 @@ async fn main() -> Result<()> {
     info!("✅ Shutdown complete");
 
     Ok(())
+}
+
+fn lang_args_to_opts(lang: LangArgs) -> TranscribeOptions {
+    TranscribeOptions {
+        lang: lang.lang,
+        translate: lang.translate,
+    }
 }
 
 async fn run_test_mode() -> Result<()> {

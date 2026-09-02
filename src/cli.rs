@@ -59,14 +59,26 @@ pub struct RecordArgs {
     pub action: RecordAction,
 }
 
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct LangArgs {
+    /// Spoken language code passed to whisper (e.g. fr, en, auto).
+    /// Overrides the config default for this single recording.
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// Translate the transcription into English (whisper can only translate into English).
+    #[arg(long)]
+    pub translate: Option<bool>,
+}
+
+#[derive(Clone, Debug, Subcommand)]
 pub enum RecordAction {
     /// Start recording if idle
-    Start,
+    Start(LangArgs),
     /// Stop recording if active
     Stop,
     /// Toggle between idle and recording
-    Toggle,
+    Toggle(LangArgs),
     /// Print current recorder state
     Status,
 }
