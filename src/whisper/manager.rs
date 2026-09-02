@@ -1,10 +1,11 @@
 use crate::transcription::{
-    clean_transcription, contains_only_non_speech_markers, BackendMetrics, BackendPhaseProbe,
-    TranscriptionResult, WhisperOverrides,
+    clean_transcription, contains_only_non_speech_markers, encode_to_wav, BackendMetrics,
+    BackendPhaseProbe, TranscriptionResult, WhisperOverrides,
 };
 use anyhow::{anyhow, Context, Result};
 use std::convert::TryFrom;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info, trace, warn};
@@ -205,7 +206,11 @@ impl WhisperManager {
         let (encode_result, mut encode_phase) = BackendPhaseProbe::measure(
             "backend.whisper.temp_wav",
             Some(audio_data.len() * std::mem::size_of::<f32>()),
-            || self.save_audio_as_wav(&audio_data, &temp_wav),
+            || -> Result<()> {
+                // WAV file header
+                let mut file = fs::File::create(&temp_wav)?;
+                Ok(file.write_all(&(encode_to_wav(&audio_data)?).data)?)
+            },
         );
         encode_result?;
         let encoded_bytes = fs::metadata(&temp_wav)
@@ -273,53 +278,6 @@ impl WhisperManager {
             text: cleaned_transcription,
             metrics,
         })
-    }
-
-    fn save_audio_as_wav(&self, audio_data: &[f32], path: &PathBuf) -> Result<()> {
-        use std::io::Write;
-
-        // Convert f32 samples to i16
-        let samples_i16: Vec<i16> = audio_data
-            .iter()
-            .map(|&sample| (sample * 32767.0).clamp(-32768.0, 32767.0) as i16)
-            .collect();
-
-        // WAV file header
-        let mut file = fs::File::create(path)?;
-
-        let channels: u16 = 1;
-        let sample_rate: u32 = 16000;
-        let bits_per_sample: u16 = 16;
-        let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
-        let block_align = channels * bits_per_sample / 8;
-        let data_size = (samples_i16.len() * 2) as u32;
-
-        // RIFF header
-        file.write_all(b"RIFF")?;
-        file.write_all(&(36 + data_size).to_le_bytes())?;
-        file.write_all(b"WAVE")?;
-
-        // fmt chunk
-        file.write_all(b"fmt ")?;
-        file.write_all(&16u32.to_le_bytes())?; // Chunk size
-        file.write_all(&1u16.to_le_bytes())?; // Audio format (PCM)
-        file.write_all(&channels.to_le_bytes())?;
-        file.write_all(&sample_rate.to_le_bytes())?;
-        file.write_all(&byte_rate.to_le_bytes())?;
-        file.write_all(&block_align.to_le_bytes())?;
-        file.write_all(&bits_per_sample.to_le_bytes())?;
-
-        // data chunk
-        file.write_all(b"data")?;
-        file.write_all(&data_size.to_le_bytes())?;
-
-        // Write samples
-        for sample in samples_i16 {
-            file.write_all(&sample.to_le_bytes())?;
-        }
-
-        debug!("Saved audio to WAV: {:?}", path);
-        Ok(())
     }
 
     async fn run_whisper_cli(

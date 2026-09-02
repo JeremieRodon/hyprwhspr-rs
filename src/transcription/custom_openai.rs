@@ -1,7 +1,7 @@
 use crate::config::{CustomProviderConfig, SubscriptionAuthSource};
 use crate::transcription::audio::{encode_to_flac, encode_to_wav, EncodedAudio};
 use crate::transcription::postprocess::clean_transcription;
-use crate::transcription::{BackendMetrics, TranscriptionResult};
+use crate::transcription::{BackendMetrics, TranscriptionResult, WhisperOverrides};
 use anyhow::{Context, Result};
 use reqwest::{header, multipart, Client, Url};
 use serde::Deserialize;
@@ -110,7 +110,11 @@ impl CustomOpenAiTranscriber {
         &self.label
     }
 
-    pub async fn transcribe(&self, audio_data: Vec<f32>) -> Result<TranscriptionResult> {
+    pub async fn transcribe(
+        &self,
+        audio_data: Vec<f32>,
+        overrides: WhisperOverrides,
+    ) -> Result<TranscriptionResult> {
         if audio_data.is_empty() {
             return Ok(TranscriptionResult {
                 text: String::new(),
@@ -126,14 +130,14 @@ impl CustomOpenAiTranscriber {
 
         let encode_start = Instant::now();
         let encoded = match self.audio_format {
-            AudioFormat::Wav => encode_to_wav(&audio_data).await?,
+            AudioFormat::Wav => encode_to_wav(&audio_data)?,
             AudioFormat::Flac => encode_to_flac(&audio_data).await?,
         };
         let encode_duration = encode_start.elapsed();
         let encoded_len = encoded.data.len();
 
         let transcribe_start = Instant::now();
-        let (raw, timings) = self.send_with_retry(&encoded).await?;
+        let (raw, timings) = self.send_with_retry(&encoded, &overrides).await?;
         let transcription_duration = transcribe_start.elapsed();
         let cleaned = clean_transcription(&raw, &self.prompt);
 
@@ -158,11 +162,15 @@ impl CustomOpenAiTranscriber {
         })
     }
 
-    async fn send_with_retry(&self, audio: &EncodedAudio) -> Result<(String, NetworkTimings)> {
+    async fn send_with_retry(
+        &self,
+        audio: &EncodedAudio,
+        overrides: &WhisperOverrides,
+    ) -> Result<(String, NetworkTimings)> {
         let attempts = cmp::max(1, self.max_retries.saturating_add(1));
 
         for attempt in 0..attempts {
-            match self.send_once(audio).await {
+            match self.send_once(audio, overrides).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     if attempt + 1 == attempts {
@@ -185,13 +193,27 @@ impl CustomOpenAiTranscriber {
         Err(anyhow::anyhow!("Unknown custom transcription failure"))
     }
 
-    async fn send_once(&self, audio: &EncodedAudio) -> Result<(String, NetworkTimings)> {
+    async fn send_once(
+        &self,
+        audio: &EncodedAudio,
+        overrides: &WhisperOverrides,
+    ) -> Result<(String, NetworkTimings)> {
         let mut form = multipart::Form::new()
             .text("model", self.model.clone())
             .text("response_format", "json".to_string());
 
-        for (key, value) in &self.body {
+        for (key, value) in self.body.iter().filter(|&(key, _)| match key.as_str() {
+            "language" if overrides.lang.is_some() => false,
+            "translate" if overrides.translate.is_some() => false,
+            _ => true,
+        }) {
             form = form.text(key.clone(), value.clone());
+        }
+        if let Some(ref lang) = overrides.lang {
+            form = form.text("language", lang.to_owned());
+        }
+        if let Some(translate) = overrides.translate {
+            form = form.text("translate", if translate { "true" } else { "false" });
         }
 
         if !self.prompt.trim().is_empty() && !self.body.iter().any(|(key, _)| key == "prompt") {
@@ -392,14 +414,22 @@ mod tests {
             content_type: "audio/wav",
         };
 
-        transcriber.send_once(&audio).await.expect("first request");
+        let overrides = WhisperOverrides::default();
+
+        transcriber
+            .send_once(&audio, &overrides)
+            .await
+            .expect("first request");
         assert_eq!(
             auth_headers.recv().await.as_deref(),
             Some("Bearer first-token")
         );
 
         write_auth_token(&auth_path, "second-token");
-        transcriber.send_once(&audio).await.expect("second request");
+        transcriber
+            .send_once(&audio, &overrides)
+            .await
+            .expect("second request");
         assert_eq!(
             auth_headers.recv().await.as_deref(),
             Some("Bearer second-token")

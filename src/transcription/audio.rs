@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::process::Command;
 use tokio::try_join;
 use tracing::debug;
@@ -25,8 +24,52 @@ pub async fn encode_to_flac(audio: &[f32]) -> Result<EncodedAudio> {
 /// whisper.cpp's server accepts WAV uploads by default. Custom OpenAI-compatible
 /// endpoints use this unless configured otherwise so local server setups do not
 /// require ffmpeg-side conversion on the server.
-pub async fn encode_to_wav(audio: &[f32]) -> Result<EncodedAudio> {
-    encode_with_ffmpeg(audio, "wav", "audio/wav", &[]).await
+pub fn encode_to_wav(audio: &[f32]) -> Result<EncodedAudio> {
+    use std::io::Write;
+
+    let mut data: Vec<u8> = vec![];
+
+    // Convert f32 samples to i16
+    let samples_i16: Vec<i16> = audio
+        .iter()
+        .map(|&sample| (sample * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
+
+    let channels: u16 = 1;
+    let sample_rate: u32 = 16000;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = channels * bits_per_sample / 8;
+    let data_size = (samples_i16.len() * 2) as u32;
+
+    // RIFF header
+    data.write_all(b"RIFF")?;
+    data.write_all(&(36 + data_size).to_le_bytes())?;
+    data.write_all(b"WAVE")?;
+
+    // fmt chunk
+    data.write_all(b"fmt ")?;
+    data.write_all(&16u32.to_le_bytes())?; // Chunk size
+    data.write_all(&1u16.to_le_bytes())?; // Audio format (PCM)
+    data.write_all(&channels.to_le_bytes())?;
+    data.write_all(&sample_rate.to_le_bytes())?;
+    data.write_all(&byte_rate.to_le_bytes())?;
+    data.write_all(&block_align.to_le_bytes())?;
+    data.write_all(&bits_per_sample.to_le_bytes())?;
+
+    // data chunk
+    data.write_all(b"data")?;
+    data.write_all(&data_size.to_le_bytes())?;
+
+    // Write samples
+    for sample in samples_i16 {
+        data.write_all(&sample.to_le_bytes())?;
+    }
+
+    Ok(EncodedAudio {
+        data: data.into(),
+        content_type: "audio/wav",
+    })
 }
 
 async fn encode_with_ffmpeg(
@@ -35,6 +78,7 @@ async fn encode_with_ffmpeg(
     content_type: &'static str,
     extra_args: &[&str],
 ) -> Result<EncodedAudio> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
     if audio.is_empty() {
         return Ok(EncodedAudio {
             data: Bytes::new(),
